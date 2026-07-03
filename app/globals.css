@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+@theme {
+  /* Paleta dle mockupu: near-black + amber akcent, zelená/modrá sémantika */
+  --color-bg: #0b0b0d;
+  --color-panel: #101013;
+  --color-card: #17171a;
+  --color-card-lift: #1d1d21;
+  --color-line: #26262b;
+  --color-ink: #f4f4f5;
+  --color-muted: #8e8f99;
+  --color-brass: #f0a33c; /* amber akcent (názvy tříd zůstávají) */
+  --color-brass-deep: #d98324;
+  --color-green: #4ade80;
+  --color-blue: #60a5fa;
+  --color-red: #f87171;
+
+  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+html {
+  background-color: var(--color-bg);
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: color-mix(in srgb, var(--color-brass) 40%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brass);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---- Primární (amber) tlačítko s jemným gradientem a září ---------------- */
+
+.btn-accent {
+  background: linear-gradient(180deg, #f6b155 0%, #e89234 100%);
+  color: #1a1205;
+  font-weight: 600;
+  box-shadow: 0 0 18px -4px rgba(240, 163, 60, 0.45);
+  transition: box-shadow 160ms ease, filter 160ms ease, transform 160ms ease;
+}
+
+.btn-accent:hover {
+  filter: brightness(1.07);
+  box-shadow: 0 0 26px -4px rgba(240, 163, 60, 0.6);
+}
+
+.btn-accent:active {
+  transform: translateY(1px);
+}
+
+/* ---- Karta v mřížce -------------------------------------------------------- */
+
+.card-hover {
+  transition: transform 180ms ease, box-shadow 180ms ease,
+    border-color 180ms ease;
+}
+
+.card-hover:hover,
+.card-hover:focus-within {
+  transform: translateY(-4px);
+  border-color: #34343b;
+  box-shadow: 0 16px 40px -14px rgba(0, 0, 0, 0.8),
+    0 0 24px -12px rgba(240, 163, 60, 0.25);
+  z-index: 3;
+}
+
+/* ---- Drobnosti -------------------------------------------------------------- */
+
+.transition-quick {
+  transition: background-color 150ms ease, border-color 150ms ease,
+    color 150ms ease, opacity 150ms ease;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.75);
+}
+
+/* Skeleton při načítání výsledků hledání obálek */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+
+.skeleton {
+  background: var(--color-card-lift);
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+  .card-hover:hover,
+  .card-hover:focus-within {
+    transform: none;
+  }
+}
