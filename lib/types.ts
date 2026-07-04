@@ -73,6 +73,8 @@ export interface CustomField {
   field_type: CustomFieldType;
   options: string[] | null;
   is_default: boolean;
+  /** Stabilní klíč pro mapování metadat z API adaptérů (director, author, year…). */
+  source_key: string | null;
   sort: number;
 }
 

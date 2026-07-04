@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type {
@@ -14,9 +14,23 @@ import type {
 } from "@/lib/types";
 import { LINK_KIND_LABELS } from "@/lib/types";
 import { statusesForType } from "@/lib/helpers";
+import {
+  AUTOCOMPLETE_TYPES,
+  SOURCE_LABELS,
+  resolveDetail,
+  searchTitles,
+  type ApiCandidate,
+} from "@/lib/metadata";
 import { StarInput } from "./StarRating";
-import CoverSearch, { type CoverCandidate } from "./CoverSearch";
-import { TypeIcon } from "./icons";
+import { Icon, TypeIcon } from "./icons";
+
+interface PendingCover {
+  title: string;
+  year: number | null;
+  thumbUrl: string | null;
+  fullUrl: string | null;
+  source: string;
+}
 
 type FieldValue = string | number | boolean | string[];
 
@@ -61,13 +75,24 @@ export default function ItemForm({ itemId }: { itemId?: string }) {
     {}
   );
   // Obálka vybraná z online hledání — uloží se až se zápisem položky
-  const [pendingCover, setPendingCover] = useState<CoverCandidate | null>(null);
+  const [pendingCover, setPendingCover] = useState<PendingCover | null>(null);
   const [existingImages, setExistingImages] = useState(0);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  // Našeptávání / hledání metadat
+  const [results, setResults] = useState<ApiCandidate[]>([]);
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupMsg, setLookupMsg] = useState<string | null>(null);
+  const lastPicked = useRef<string>("");
 
   // Načtení číselníků (+ položky v režimu úprav)
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      supabase.auth.getUser().then(({ data }) => {
+        if (!cancelled) setUserId(data.user?.id ?? null);
+      });
       const [mt, st, pl, mtp, cf, ge] = await Promise.all([
         supabase.from("media_types").select("*").order("sort"),
         supabase.from("statuses").select("*").order("sort"),
@@ -216,6 +241,119 @@ export default function ItemForm({ itemId }: { itemId?: string }) {
     if (copy.has(id)) copy.delete(id);
     else copy.add(id);
     return copy;
+  }
+
+  const isAutocomplete = selectedType
+    ? AUTOCOMPLETE_TYPES.has(selectedType.slug)
+    : false;
+
+  // Spustí hledání kandidátů (našeptávání i tlačítko používají totéž)
+  const runLookup = async (q: string) => {
+    if (!selectedType || !q.trim()) return;
+    setLookupBusy(true);
+    setLookupMsg(null);
+    const res = await searchTitles(supabase, selectedType.slug, q.trim());
+    setLookupBusy(false);
+    if (res.error) {
+      setLookupMsg("Hledání se nepovedlo — zkontroluj připojení a zkus to znovu.");
+      return;
+    }
+    if (res.unavailable) {
+      setResults([]);
+      setResultsOpen(false);
+      setLookupMsg(res.reason ?? "Pro tento typ se metadata nedotahují.");
+      return;
+    }
+    setResults(res.results ?? []);
+    setResultsOpen(true);
+    if ((res.results ?? []).length === 0) {
+      setLookupMsg("Nic se nenašlo — uprav název, nebo vyplň údaje ručně.");
+    }
+  };
+
+  // Našeptávání: debounce při psaní (jen typy s bezklíčovým zdrojem)
+  useEffect(() => {
+    if (!isAutocomplete) {
+      setResults([]);
+      setResultsOpen(false);
+      return;
+    }
+    const q = title.trim();
+    if (q.length < 2 || q === lastPicked.current) {
+      setResults([]);
+      setResultsOpen(false);
+      return;
+    }
+    const handle = setTimeout(() => runLookup(q), 350);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, mediaTypeId]);
+
+  // Výběr kandidáta → název + obálka + metadata (doplní jen prázdná pole)
+  async function pickCandidate(cand: ApiCandidate) {
+    if (!selectedType) return;
+    lastPicked.current = cand.title;
+    setTitle(cand.title);
+    setResults([]);
+    setResultsOpen(false);
+    setLookupMsg(null);
+    setLookupBusy(true);
+    const detail = await resolveDetail(supabase, selectedType.slug, cand);
+    setLookupBusy(false);
+    if (!detail) {
+      setLookupMsg("Detail se nepodařilo načíst, zkus jiného kandidáta.");
+      return;
+    }
+
+    setPendingCover({
+      title: cand.title,
+      year: detail.year ?? cand.year,
+      thumbUrl: detail.cover.thumb ?? cand.thumbUrl,
+      fullUrl: detail.cover.full ?? detail.cover.thumb ?? cand.thumbUrl,
+      source: cand.source,
+    });
+
+    // Pole podle source_key — jen tam, kde uživatel nic nevyplnil
+    setFieldValues((prev) => {
+      const next = { ...prev };
+      for (const [key, val] of Object.entries(detail.fields)) {
+        const field = typeFields.find((f) => f.source_key === key);
+        if (!field) continue;
+        const cur = next[field.id];
+        const empty =
+          cur === undefined ||
+          cur === "" ||
+          (Array.isArray(cur) && cur.length === 0);
+        if (empty) {
+          next[field.id] =
+            field.field_type === "number" ? Number(val) : String(val);
+        }
+      }
+      return next;
+    });
+
+    // Žánry z API — chybějící se založí, pak přiřadí položce
+    if (detail.genres.length > 0 && lookups && userId) {
+      let local = lookups.genres;
+      const ids = new Set(genreIds);
+      for (const name of detail.genres) {
+        let g = local.find((x) => x.name.toLowerCase() === name.toLowerCase());
+        if (!g) {
+          const { data } = await supabase
+            .from("genres")
+            .insert({ user_id: userId, name })
+            .select("*")
+            .single();
+          if (data) {
+            local = [...local, data as Genre];
+            g = data as Genre;
+          }
+        }
+        if (g) ids.add(g.id);
+      }
+      setGenreIds(ids);
+      setLookups((prev) => (prev ? { ...prev, genres: local } : prev));
+    }
   }
 
   function setFieldValue(fieldId: string, value: FieldValue | undefined) {
@@ -379,79 +517,161 @@ export default function ItemForm({ itemId }: { itemId?: string }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-7">
-      {/* Základ */}
+      {/* Typ + název + hledání metadat */}
       <section>
-        <label htmlFor="title" className="mb-1.5 block text-sm text-muted">
-          Název <span className="text-brass">*</span>
-        </label>
-        <input
-          id="title"
-          required
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Disco Elysium, Spálené kosti, Zaklínač…"
-          className={`${inputCls} text-base`}
-        />
-
-        <p className="mb-1.5 mt-4 text-sm text-muted">
+        <label htmlFor="type" className="mb-1.5 block text-sm text-muted">
           Typ média <span className="text-brass">*</span>
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          {lookups.mediaTypes.map((t) => {
-            const active = mediaTypeId === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => changeType(t.id)}
-                aria-pressed={active}
-                className={
-                  active
-                    ? "btn-accent flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs"
-                    : `${chipCls} flex items-center gap-1.5 py-1.5 ${chipOff}`
-                }
-              >
-                <TypeIcon slug={t.slug} size={13} />
+        </label>
+        <div className="relative">
+          {selectedType && (
+            <span
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2"
+              style={{ color: selectedType.color }}
+            >
+              <TypeIcon slug={selectedType.slug} size={16} />
+            </span>
+          )}
+          <select
+            id="type"
+            required
+            value={mediaTypeId}
+            onChange={(e) => changeType(e.target.value)}
+            className={`${inputCls} ${selectedType ? "pl-9" : ""}`}
+          >
+            <option value="">— vyber typ —</option>
+            {lookups.mediaTypes.map((t) => (
+              <option key={t.id} value={t.id}>
                 {t.name}
-              </button>
-            );
-          })}
+              </option>
+            ))}
+          </select>
         </div>
 
-        {/* Online hledání obálky (kap. 3.3) */}
-        {title.trim() && selectedType && (
-          <div className="mt-4">
-            {pendingCover ? (
-              <div className="flex items-center gap-3 rounded-xl border border-line bg-card p-2.5">
-                {(pendingCover.thumbUrl ?? pendingCover.fullUrl) && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={pendingCover.thumbUrl ?? pendingCover.fullUrl ?? ""}
-                    alt=""
-                    className="h-16 w-11 rounded-md object-cover"
-                  />
-                )}
-                <div className="min-w-0 flex-1 text-sm">
-                  <p className="truncate font-semibold">{pendingCover.title}</p>
-                  <p className="text-xs text-muted">
-                    Obálka se uloží se zápisem · {pendingCover.year ?? "?"}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setPendingCover(null)}
-                  className="transition-quick shrink-0 text-xs font-medium text-muted hover:text-red"
-                >
-                  Zrušit
-                </button>
-              </div>
-            ) : (
-              <CoverSearch
-                title={title}
-                typeSlug={selectedType.slug}
-                onPick={setPendingCover}
+        <label htmlFor="title" className="mb-1.5 mt-4 block text-sm text-muted">
+          Název <span className="text-brass">*</span>
+          {isAutocomplete && (
+            <span className="ml-2 text-xs text-muted/70">
+              našeptává se při psaní
+            </span>
+          )}
+        </label>
+        <div className="relative">
+          <input
+            id="title"
+            required
+            autoComplete="off"
+            value={title}
+            onChange={(e) => {
+              lastPicked.current = "";
+              setTitle(e.target.value);
+            }}
+            onFocus={() => results.length > 0 && setResultsOpen(true)}
+            placeholder={
+              selectedType ? "Začni psát název…" : "Nejdřív vyber typ média"
+            }
+            className={`${inputCls} text-base`}
+          />
+          {isAutocomplete && lookupBusy && (
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted">
+              hledám…
+            </span>
+          )}
+
+          {/* Našeptávač */}
+          {isAutocomplete && resultsOpen && results.length > 0 && (
+            <ul className="absolute z-20 mt-1 max-h-80 w-full overflow-auto rounded-xl border border-line bg-panel p-1 shadow-2xl">
+              {results.slice(0, 8).map((r) => (
+                <li key={`${r.source}-${r.sourceId}`}>
+                  <button
+                    type="button"
+                    onClick={() => pickCandidate(r)}
+                    className="transition-quick flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-card"
+                  >
+                    <span className="h-12 w-8 shrink-0 overflow-hidden rounded bg-card">
+                      {r.thumbUrl && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={r.thumbUrl} alt="" className="h-full w-full object-cover" />
+                      )}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium">{r.title}</span>
+                      <span className="block text-xs text-muted">
+                        {r.year ?? "?"} · {SOURCE_LABELS[r.source] ?? r.source}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Tlačítko hledání pro typy bez našeptávání (komiks, hra, desková hra) */}
+        {selectedType && !isAutocomplete && (
+          <button
+            type="button"
+            onClick={() => runLookup(title)}
+            disabled={!title.trim() || lookupBusy}
+            className="transition-quick mt-2 flex items-center gap-2 rounded-lg border border-brass/50 px-3 py-2 text-sm font-medium text-brass hover:bg-brass/10 disabled:opacity-40"
+          >
+            <Icon name="search" size={14} />
+            {lookupBusy ? "Hledám…" : "Najít metadata a obálku"}
+          </button>
+        )}
+
+        {lookupMsg && (
+          <p className="mt-2 text-sm leading-relaxed text-muted">{lookupMsg}</p>
+        )}
+
+        {/* Mřížka kandidátů (tlačítkový režim) */}
+        {!isAutocomplete && resultsOpen && results.length > 0 && (
+          <div className="mt-3 grid grid-cols-3 gap-2 rounded-xl border border-line bg-panel p-3 sm:grid-cols-6">
+            {results.slice(0, 12).map((r) => (
+              <button
+                key={`${r.source}-${r.sourceId}`}
+                type="button"
+                onClick={() => pickCandidate(r)}
+                className="card-hover overflow-hidden rounded-lg border border-line bg-card text-left"
+              >
+                <span className="block aspect-[2/3] bg-bg">
+                  {r.thumbUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={r.thumbUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+                  )}
+                </span>
+                <span className="block p-1.5">
+                  <span className="block truncate text-[11px] font-semibold">{r.title}</span>
+                  <span className="block text-[10px] text-muted">{r.year ?? "?"}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Vybraná obálka */}
+        {pendingCover && (
+          <div className="mt-3 flex items-center gap-3 rounded-xl border border-line bg-card p-2.5">
+            {(pendingCover.thumbUrl ?? pendingCover.fullUrl) && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={pendingCover.thumbUrl ?? pendingCover.fullUrl ?? ""}
+                alt=""
+                className="h-16 w-11 rounded-md object-cover"
               />
             )}
+            <div className="min-w-0 flex-1 text-sm">
+              <p className="truncate font-semibold">{pendingCover.title}</p>
+              <p className="text-xs text-muted">
+                Obálka se uloží se zápisem · metadata doplněna do polí níž
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPendingCover(null)}
+              className="transition-quick shrink-0 text-xs font-medium text-muted hover:text-red"
+            >
+              Zrušit
+            </button>
           </div>
         )}
       </section>
